@@ -1,0 +1,462 @@
+// Скетч MCP: Полное задание 1-5
+// Сохранить как: MCP_Full.ino
+
+#include <Servo.h>
+
+// ==================== ОПРЕДЕЛЕНИЕ ПИНОВ ====================
+// Двигатели
+const int IN1 = 4;
+const int IN2 = 5;
+const int IN3 = 6;
+const int IN4 = 7;
+const int SPEED_R = 9;
+const int SPEED_L = 10;
+
+// Кнопка
+const int BUTTON = 8;
+bool buttonPressed = false;
+int buttonPressCount = 0;
+
+// Датчики линии
+const int LINE_SENSOR_RIGHT = A0;
+const int LINE_SENSOR_LEFT = A1;
+
+// Ультразвуковой датчик
+const int HC_TRIG = 2;
+const int HC_ECHO = 3;
+
+// Сервопривод
+const int SERVO_PIN = 11;
+Servo myServo;
+
+// Переменные
+int lineThreshold = 500;
+int taskState = 0;  // 0-начальная последовательность, 1-ожидание 5 нажатий для линии, 2-ожидание кнопки для УЗ, 3-серво
+bool initialSequenceDone = false;
+
+// ==================== ФУНКЦИИ ДВИЖЕНИЯ (ЗАДАНИЕ 1) ====================
+
+// Движение с индивидуальным управлением моторами
+void moveMotors(int leftDir, int rightDir, int leftSpeed, int rightSpeed, int duration) {
+  // Левый мотор
+  if (leftDir == 1) { // вперед
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+  } else if (leftDir == -1) { // назад
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+  } else { // стоп
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+  }
+  analogWrite(SPEED_L, leftSpeed);
+  
+  // Правый мотор
+  if (rightDir == 1) { // вперед
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+  } else if (rightDir == -1) { // назад
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+  } else { // стоп
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+  }
+  analogWrite(SPEED_R, rightSpeed);
+  
+  if (duration > 0) {
+    delay(duration);
+  }
+}
+
+// Функция принудительной остановки (Задание 1.2)
+void emergencyStop() {
+  Serial.println("Экстренная остановка...");
+  
+  // Максимальная скорость с быстрым переключением направления
+  for (int i = 0; i < 100; i++) {
+    // Вперед
+    moveMotors(1, 1, 255, 255, 0);
+    delay(1);
+    // Назад
+    moveMotors(-1, -1, 255, 255, 0);
+    delay(1);
+  }
+  
+  // Полная остановка
+  moveMotors(0, 0, 0, 0, 0);
+  Serial.println("Остановка завершена");
+}
+
+// Упрощенные функции для последовательности
+void forward(int t, int speed_l, int speed_r) {
+  moveMotors(1, 1, speed_l, speed_r, t);
+}
+
+void stop(int t) {
+  moveMotors(0, 0, 0, 0, 0);
+  if (t > 0) {
+    delay(t);
+  }
+}
+
+void backward(int t, int speed_l, int speed_r) {
+  moveMotors(-1, -1, speed_l, speed_r, t);
+}
+
+void tankTurnCW(int t, int speed) { // По часовой
+  moveMotors(1, -1, speed, speed, t);
+}
+
+void tankTurnCCW(int t, int speed) { // Против часовой
+  moveMotors(-1, 1, speed, speed, t);
+}
+
+// ==================== ПОСЛЕДОВАТЕЛЬНОСТЬ ДВИЖЕНИЯ (ЗАДАНИЕ 1.3) ====================
+
+void initialMovementSequence() {
+  Serial.println("=== НАЧАЛЬНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ ===");
+  int speed = 150; // 30% от 255 примерно 76, используем 150 для демонстрации
+  
+  // 1. Вперед 2 секунды
+  Serial.println("Вперед 2 сек");
+  forward(2000, speed, speed);
+  emergencyStop();
+  delay(1000);
+  
+  // 2. Назад 1 секунду
+  Serial.println("Назад 1 сек");
+  backward(1000, speed, speed);
+  emergencyStop();
+  delay(1000);
+  
+  // 3. Танковый поворот по часовой стрелке 0,5 секунды
+  Serial.println("Поворот по ЧС 0.5 сек");
+  tankTurnCW(500, speed);
+  emergencyStop();
+  delay(1000);
+  
+  // 4. Танковый поворот против часовой стрелки 1,5 секунды
+  Serial.println("Поворот против ЧС 1.5 сек");
+  tankTurnCCW(1500, speed);
+  emergencyStop();
+  delay(1000);
+  
+  Serial.println("Начальная последовательность завершена");
+  initialSequenceDone = true;
+  taskState = 1; // Переходим к ожиданию 5 нажатий для задания 3
+}
+
+// ==================== ОБРАБОТКА КНОПКИ (ЗАДАНИЕ 2) ====================
+
+void handleButton() {
+  // Антидребезг
+  if (!digitalRead(BUTTON)) {
+    delay(50); // Задержка для устранения дребезга
+    if (!digitalRead(BUTTON)) {
+      buttonPressed = true;
+      // Ждем отпускания кнопки
+      while (!digitalRead(BUTTON)) {
+        delay(10);
+      }
+      delay(50); // Дополнительная задержка после отпускания
+    }
+  }
+}
+
+// ==================== ЗАДАНИЕ 3: ВЫРАВНИВАНИЕ ПО ЛИНИИ ====================
+
+void calibrateLineSensors() {
+  Serial.println("=== КАЛИБРОВКА ДАТЧИКОВ ЛИНИИ ===");
+  Serial.println("Поместите правый датчик на белую зону и нажмите кнопку");
+  waitForButtonPress();
+  int whiteRight = analogRead(LINE_SENSOR_RIGHT);
+  
+  Serial.println("Поместите правый датчик на черную зону и нажмите кнопку");
+  waitForButtonPress();
+  int blackRight = analogRead(LINE_SENSOR_RIGHT);
+  
+  Serial.println("Поместите левый датчик на белую зону и нажмите кнопку");
+  waitForButtonPress();
+  int whiteLeft = analogRead(LINE_SENSOR_LEFT);
+  
+  Serial.println("Поместите левый датчик на черную зону и нажмите кнопку");
+  waitForButtonPress();
+  int blackLeft = analogRead(LINE_SENSOR_LEFT);
+  
+  // Усредненный порог
+  lineThreshold = (whiteRight + whiteLeft + blackRight + blackLeft) / 4;
+  Serial.print("Установлен порог: ");
+  Serial.println(lineThreshold);
+  Serial.println("Калибровка завершена");
+}
+
+void waitForButtonPress() {
+  while (digitalRead(BUTTON)) {
+    delay(10);
+  }
+  // Ждем отпускания
+  while (!digitalRead(BUTTON)) {
+    delay(10);
+  }
+  delay(200);
+}
+
+void lineAlignment() {
+  Serial.println("=== ВЫРАВНИВАНИЕ ПО ЛИНИИ ===");
+  int speed = 76; // 30% от 255
+  
+  // Определяем начальный цвет под левым датчиком
+  bool leftOnWhite = analogRead(LINE_SENSOR_LEFT) >= lineThreshold;
+  bool rightOnWhite = analogRead(LINE_SENSOR_RIGHT) >= lineThreshold;
+  
+  // Если оба датчика показывают одинаковый цвет
+  if (leftOnWhite == rightOnWhite) {
+    bool targetColor = leftOnWhite; // Текущий цвет
+    bool oppositeColor = !targetColor; // Цель - противоположный цвет
+    
+    Serial.print("Начальный цвет: ");
+    Serial.println(targetColor ? "БЕЛЫЙ" : "ЧЕРНЫЙ");
+    Serial.print("Цель: ");
+    Serial.println(oppositeColor ? "БЕЛЫЙ" : "ЧЕРНЫЙ");
+    
+    // Движение вперед пока оба датчика на одном цвете
+    Serial.println("Движение вперед...");
+    while (leftOnWhite == rightOnWhite && leftOnWhite == targetColor) {
+      forward(50, speed, speed);
+      
+      leftOnWhite = analogRead(LINE_SENSOR_LEFT) >= lineThreshold;
+      rightOnWhite = analogRead(LINE_SENSOR_RIGHT) >= lineThreshold;
+    }
+    
+    // Экстренная остановка
+    emergencyStop();
+    
+    // Определяем какой датчик первым обнаружил другой цвет
+    bool leftChanged = (analogRead(LINE_SENSOR_LEFT) >= lineThreshold) != targetColor;
+    bool rightChanged = (analogRead(LINE_SENSOR_RIGHT) >= lineThreshold) != targetColor;
+    
+    Serial.print("Левый изменился: ");
+    Serial.println(leftChanged);
+    Serial.print("Правый изменился: ");
+    Serial.println(rightChanged);
+    
+    // Выравнивание - вращаем колесо с противоположной стороны
+    if (leftChanged && !rightChanged) {
+      // Левый датчик увидел другой цвет, вращаем правое колесо
+      Serial.println("Вращаем правое колесо");
+      while ((analogRead(LINE_SENSOR_RIGHT) >= lineThreshold) == targetColor) {
+        moveMotors(0, 1, 0, speed, 0); // Только правый мотор вперед
+        delay(50);
+      }
+    } else if (!leftChanged && rightChanged) {
+      // Правый датчик увидел другой цвет, вращаем левое колесо
+      Serial.println("Вращаем левое колесо");
+      while ((analogRead(LINE_SENSOR_LEFT) >= lineThreshold) == targetColor) {
+        moveMotors(1, 0, speed, 0, 0); // Только левый мотор вперед
+        delay(50);
+      }
+    }
+    
+    // Остановка после выравнивания
+    moveMotors(0, 0, 0, 0, 0);
+    Serial.println("Выравнивание завершено");
+  } else {
+    Serial.println("Датчики уже на разных цветах - пропускаем движение");
+  }
+  
+  delay(1000);
+  taskState = 2; // Переходим к заданию 4
+}
+
+// ==================== ЗАДАНИЕ 4: ДАТЧИК РАССТОЯНИЯ ====================
+
+float measureDistance() {
+  // Генерируем импульс 10 мкс
+  digitalWrite(HC_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(HC_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(HC_TRIG, LOW);
+  
+  // Измеряем длительность ответного импульса
+  long duration = pulseIn(HC_ECHO, HIGH, 30000); // Таймаут 30 мс
+  
+  // Рассчитываем расстояние в см
+  float distance = duration * 0.034 / 2;
+  
+  if (distance <= 0 || distance > 400) {
+    return 400; // Максимальное значение при ошибке
+  }
+  
+  return distance;
+}
+
+void objectDetection() {
+  Serial.println("=== ОБНАРУЖЕНИЕ ОБЪЕКТА ===");
+  int speed = 76; // 30% от максимальной скорости
+  
+  // Ожидание нажатия кнопки для старта
+  Serial.println("Нажмите кнопку для начала обнаружения объекта");
+  waitForButtonPress();
+  
+  // Движение вперед пока расстояние > 10 см
+  float distance;
+  do {
+    distance = measureDistance();
+    Serial.print("Расстояние: ");
+    Serial.print(distance);
+    Serial.println(" см");
+    
+    if (distance > 10) {
+      forward(100, speed, speed);
+    } else {
+      break;
+    }
+    
+    delay(50);
+  } while (distance > 10);
+  
+  // Остановка при обнаружении объекта
+  Serial.println("Объект обнаружен на расстоянии <= 10 см!");
+  emergencyStop();
+  
+  taskState = 3; // Переходим к заданию 5
+  Serial.println("Задание 4 завершено. Переходим к захвату объекта...");
+}
+
+// ==================== ЗАДАНИЕ 5: ЗАХВАТ ОБЪЕКТА ====================
+
+void servoSetup() {
+  myServo.attach(SERVO_PIN);
+  delay(500);
+  // Начальное положение - отпущено
+  myServo.write(0);
+  Serial.println("Сервопривод в положении: ОТПУЩЕНО");
+  delay(1000);
+}
+
+void servoGrab() {
+  Serial.println("=== ЗАХВАТ ОБЪЕКТА ===");
+  
+  // Проверяем подключение сервопривода
+  if (!myServo.attached()) {
+    myServo.attach(SERVO_PIN);
+    delay(500);
+  }
+  
+  // Переход в положение ЗАХВАЧЕНО
+  Serial.println("Перевод сервопривода в положение: ЗАХВАЧЕНО");
+  myServo.write(90);
+  delay(2000);
+  
+  // Возврат в положение ОТПУЩЕНО
+  Serial.println("Возврат в положение: ОТПУЩЕНО");
+  myServo.write(0);
+  delay(2000);
+  
+  myServo.detach();
+  Serial.println("Задание 5 завершено");
+  
+  // Сброс состояния
+  taskState = 0;
+  initialSequenceDone = false;
+  buttonPressCount = 0;
+}
+
+// ==================== НАСТРОЙКА ====================
+
+void setup() {
+  // Настройка пинов двигателей
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(SPEED_L, OUTPUT);
+  pinMode(SPEED_R, OUTPUT);
+  
+  // Настройка кнопки
+  pinMode(BUTTON, INPUT_PULLUP);
+  
+  // Настройка датчиков линии
+  pinMode(LINE_SENSOR_RIGHT, INPUT);
+  pinMode(LINE_SENSOR_LEFT, INPUT);
+  
+  // Настройка УЗ датчика
+  pinMode(HC_TRIG, OUTPUT);
+  pinMode(HC_ECHO, INPUT);
+  
+  // Инициализация Serial
+  Serial.begin(9600);
+  delay(1000);
+  
+  Serial.println("=== MCP ПОЛНАЯ ПРОГРАММА ===");
+  Serial.println("Задание 1: Движение и остановка");
+  Serial.println("Задание 2: Кнопка (5 нажатий для задания 3)");
+  Serial.println("Задание 3: Выравнивание по линии");
+  Serial.println("Задание 4: Обнаружение объекта");
+  Serial.println("Задание 5: Захват объекта");
+  Serial.println("================================");
+  
+  // Инициализация сервопривода
+  servoSetup();
+  
+  // Запуск начальной последовательности движения (Задание 1.3)
+  delay(2000);
+  initialMovementSequence();
+}
+
+// ==================== ОСНОВНОЙ ЦИКЛ ====================
+
+void loop() {
+  // Обработка кнопки
+  if (!digitalRead(BUTTON) && !buttonPressed) {
+    delay(50); // Антидребезг
+    if (!digitalRead(BUTTON)) {
+      buttonPressed = true;
+      buttonPressCount++;
+      Serial.print("Нажатие кнопки #");
+      Serial.println(buttonPressCount);
+      
+      // Ждем отпускания
+      while (!digitalRead(BUTTON)) {
+        delay(10);
+      }
+      delay(100);
+      buttonPressed = false;
+    }
+  }
+  
+  // Управление заданиями в зависимости от состояния
+  if (!initialSequenceDone) {
+    // Начальная последовательность уже выполнена в setup()
+    return;
+  }
+  
+  switch (taskState) {
+    case 1: // Ожидание 5 нажатий для задания 3
+      if (buttonPressCount >= 5) {
+        Serial.println("Запуск задания 3: Выравнивание по линии");
+        calibrateLineSensors();
+        lineAlignment();
+        buttonPressCount = 0;
+      }
+      break;
+      
+    case 2: // Ожидание нажатия для задания 4
+      if (buttonPressCount >= 1) {
+        Serial.println("Запуск задания 4: Обнаружение объекта");
+        objectDetection();
+        buttonPressCount = 0;
+      }
+      break;
+      
+    case 3: // Автоматический запуск задания 5 после задания 4
+      Serial.println("Автоматический запуск задания 5: Захват объекта");
+      servoGrab();
+      buttonPressCount = 0;
+      break;
+  }
+  
+  delay(10);
+}
